@@ -6,6 +6,8 @@ let abilities = [];
 let orbs = [];
 let falling = [];
 
+let playerImg; // imagem do jogador
+
 let gameState = "menu"; // menu / playing / levelup / gameover / paused
 let choices = [];
 
@@ -27,6 +29,10 @@ let allAbilities = {
   9: "Tiros laterais (ângulo maior por nível)"
 };
 
+function preload() {
+  playerImg = loadImage('player.png'); // coloque player.png na mesma pasta
+}
+
 function setup() {
   createCanvas(800, 600);
   resetGame();
@@ -39,7 +45,7 @@ function resetGame() {
     speed: 200,
     xp: 0,
     level: 1,
-    size: 20,
+    size: 20, // usado para colisão
     hp: 5,
     baseFireRate: 0.5,
     fireRate: 0.5
@@ -59,6 +65,14 @@ function resetGame() {
 
 function draw() {
   background(30);
+
+  if (!playerImg) {
+    fill(255);
+    textAlign(CENTER);
+    textSize(24);
+    text("Carregando imagem...", width / 2, height / 2);
+    return;
+  }
 
   if (gameState === "menu") {
     fill(255);
@@ -86,9 +100,9 @@ function draw() {
   }
 
   if (gameState === "levelup") {
-    drawGame();
-    drawLevelUp();
-    return;
+    drawGame();      // mostra o jogo como estava
+    drawLevelUp();   // mostra as opções
+    return;          // NÃO atualiza a lógica do jogo
   }
 
   if (gameState === "playing") {
@@ -120,7 +134,7 @@ function updateGame() {
     fireTimer = player.fireRate;
   }
 
-  // Orbs (orbitar inimigos e destruir ao colidir)
+  // Orbs
   for (let orb of orbs) {
     let ability = getAbility(3);
     let lvl = ability ? ability.level : 0;
@@ -139,7 +153,7 @@ function updateGame() {
     }
   }
 
-  // Bombas (caem periodicamente)
+  // Bombas
   let ability4 = getAbility(4);
   let lvl4 = ability4 ? ability4.level : 0;
   let bombInterval = lvl4 > 0 ? max(3, 15 - lvl4 * 2) : 15;
@@ -225,9 +239,9 @@ function updateGame() {
 }
 
 function drawGame() {
-  // Player
-  fill(0, 200, 255);
-  ellipse(player.x, player.y, 30);
+  // Player (imagem)
+  imageMode(CENTER);
+  image(playerImg, player.x, player.y, 40, 40);
 
   // Inimigos
   fill(255);
