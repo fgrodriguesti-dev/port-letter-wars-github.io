@@ -281,16 +281,35 @@ function drawGame() {
 function drawLevelUp() {
   fill(255);
   textAlign(CENTER);
-  textSize(16);
-  text("Você subiu de nível! Escolha uma habilidade:", width / 2, 200);
+  textSize(20);
+  text("Você subiu de nível! Escolha uma habilidade:", width / 2, 150);
+
+  let boxWidth = 300;
+  let boxHeight = 50;
+  let startY = 220;
+  let gap = 20;
 
   for (let i = 0; i < choices.length; i++) {
     let id = choices[i];
     let ability = getAbility(id);
     let lvl = ability ? ability.level : 0;
-    let extra = ability ? " (já tem lvl " + lvl + ")" : "";
-    text("(" + (i + 1) + ") " + allAbilities[id] + extra, width / 2, 240 + i * 30);
+    let extra = ability ? " (lvl " + lvl + ")" : "";
+
+    // retângulo de fundo
+    fill(50, 100, 200);
+    rectMode(CENTER);
+    rect(width / 2, startY + i * (boxHeight + gap), boxWidth, boxHeight, 10);
+
+    // texto da habilidade
+    fill(255);
+    textSize(16);
+    text("(" + (i + 1) + ") " + allAbilities[id] + extra, width / 2, startY + i * (boxHeight + gap) + 6);
   }
+
+  // instrução
+  fill(255);
+  textSize(14);
+  text("Pressione 1, 2 ou 3 para escolher", width / 2, startY + choices.length * (boxHeight + gap));
 }
 
 function spawnEnemy() {
