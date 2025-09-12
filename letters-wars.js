@@ -6,23 +6,53 @@ let abilities = [];
 let orbs = [];
 let falling = [];
 
-let playerImg; // imagem do jogador
+let playerImg;
+
+// === NOVO: imagens dos inimigos (a..z sem f), cada letra tem [normal, alt] ===
+let enemyImgs = {};       // { 'a': [imgA, imgA1], ... }
+let enemyLetters = [];    // ['a','b',...,'z'] sem 'f'
+
+// === DIFICULDADE / BALANCE ===
+const BULLET_DAMAGE = 1;
+const EXPLOSION_DAMAGE = 1;
+const ORB_DAMAGE = 3;
+const ORB_HIT_COOLDOWN = 0.2;  // s: tempo entre acertos do mesmo orb
+const NORMAL_SIZE = 48;
+const BOSS_SIZE = 64;
+const BOSS_HP = 150;
+const SAFE_SPAWN_DIST = 100;
+
+const DIFF_SPAWN_DECAY = 0.05; // -5% no intervalo por round
+const DIFF_SPAWN_MIN = 0.25;   // mínimo 0.25s entre spawns
+const DIFF_SPEED_SCALE = 0.06; // +6% de velocidade por round
+
+// === Chefes por abates ===
+let killsTotal = 0;
+let killsSinceBoss = 0;
+let spawnBossNext = false;
 
 let gameState = "menu"; // menu / playing / levelup / gameover / paused
 let choices = [];
+let levelUpBoxes = []; // caixas clicáveis do level up
 
-let roundTime = 30;
+let roundTime = 120;
 let roundTimer = roundTime;
 let spawnTimer = 0;
 let fireTimer = 0;
 let fallingTimer = 15;
 
-let roundNumber = 1; // contador de rounds
+let roundNumber = 1;
+
+let isMobile = false;
+let joystick = { active: false, baseX: 0, baseY: 0, stickX: 0, stickY: 0 };
+
+/* Botão de pause/play no HUD */
+let pauseButton = { x: 0, y: 0, w: 50, h: 50 };
 
 let allAbilities = {
   1: "Tiro '-' (mais rápido por nível)",
   2: "Tiro '+' (mais rápido por nível)",
-  3: "Orb '@' orbitando (raio/velocidade sobem)",
+  3: "Orb 🌀 orbitando (raio/velocidade sobem)",
   4: "Bomba '!' caída (intervalo menor por nível)",
   5: "Velocidade do jogador (+spd por nível)",
   6: "Taxa de tiro (intervalo menor por nível)",
@@ -32,12 +62,28 @@ let allAbilities = {
 };
 
 function preload() {
-  playerImg = loadImage('player.png'); // coloque player.png na mesma pasta
+  playerImg = loadImage("player.png");
+
+  // Carrega inimigos: a..z exceto f, com variações X.png e X1.png
+  const letters = "abcdefghijklmnopqrstuvwxyz".split("").filter(l => l !== "f");
+  enemyLetters = letters.slice();
+  for (let l of letters) {
+    const img0 = loadImage(`enemys/${l}.png`);
+    const img1 = loadImage(`enemys/${l}1.png`);
+    enemyImgs[l] = [img0, img1];
+  }
 }
 
 function setup() {
-  createCanvas(800, 600);
+  createCanvas(windowWidth, windowHeight);
   resetGame();
+  isMobile = /Android|iPhone|iPad|iPod|webOS|BlackBerry|IEMobile|Opera Mini/i.test(
+    navigator.userAgent
+  );
+}
+
+function windowResized() {
+  resizeCanvas(windowWidth, windowHeight);
 }
 
 function resetGame() {
@@ -64,10 +110,22 @@ function resetGame() {
   fireTimer = 0;
   fallingTimer = 15;
   roundNumber = 1;
+
+  killsTotal = 0;
+  killsSinceBoss = 0;
+  spawnBossNext = false;
 }
 
 function draw() {
   background(30);
+
+  if (isMobile && windowHeight > windowWidth) {
+    fill(255);
+    textAlign(CENTER, CENTER);
+    textSize(24);
+    text("Por favor, vire o dispositivo na horizontal 📱↔️", width / 2, height / 2);
+    return;
+  }
 
   if (!playerImg) {
     fill(255);
@@ -79,83 +137,117 @@ function draw() {
 
   if (gameState === "menu") {
     fill(255);
-    textAlign(CENTER);
-    textSize(24);
-    text("LETTER WARS \nPressione ENTER para começar", width / 2, height / 2);
+    textAlign(CENTER, CENTER);
+    textSize(isMobile ? 32 : 24);
+    text("LETTER WARS \nClique/toque para começar", width / 2, height / 2);
     return;
   }
 
   if (gameState === "gameover") {
     fill(255);
-    textAlign(CENTER);
-    textSize(24);
-    text("GAME OVER\nPressione ENTER para tentar novamente", width / 2, height / 2);
-    text("Level alcançado: " + player.level, width / 2, height / 2 + 50);
-    return;
-  }
-
-  if (gameState === "paused") {
-    fill(255);
-    textAlign(CENTER);
-    textSize(24);
-    text("PAUSADO\nPressione P para continuar", width / 2, height / 2);
+    textAlign(CENTER, CENTER);
+    textSize(isMobile ? 32 : 24);
+    text("GAME OVER\nClique/toque para tentar novamente", width / 2, height / 2);
+    text("Level alcançado: " + player.level, width / 2, height / 2 + (isMobile ? 80 : 50));
     return;
   }
 
   if (gameState === "levelup") {
+    drawGame();     // mantém a cena congelada
+    drawLevelUp();  // overlay de escolhas (clicável)
+    return;
+  }
+
+  if (gameState === "paused") {
     drawGame();
-    drawLevelUp();
+    drawPauseOverlay(); // overlay translúcido
     return;
   }
 
   if (gameState === "playing") {
     updateGame();
     drawGame();
+    if (isMobile) drawJoystick();
   }
+}
+
+function getSpawnInterval() {
+  // diminui ~5% por round até um mínimo
+  const factor = Math.max(0, 1 - DIFF_SPAWN_DECAY * (roundNumber - 1));
+  return max(DIFF_SPAWN_MIN, 1 * factor);
+}
+
+function getSpeedScale() {
+  // aumenta ~6% por round
+  return 1 + DIFF_SPEED_SCALE * (roundNumber - 1);
 }
 
 function updateGame() {
   let dt = deltaTime / 1000;
+  let moveX = 0, moveY = 0;
 
-  if (keyIsDown(87)) player.y -= player.speed * dt;
-  if (keyIsDown(83)) player.y += player.speed * dt;
-  if (keyIsDown(65)) player.x -= player.speed * dt;
-  if (keyIsDown(68)) player.x += player.speed * dt;
+  if (isMobile && joystick.active) {
+    moveX = (joystick.stickX - joystick.baseX) / 40;
+    moveY = (joystick.stickY - joystick.baseY) / 40;
+  } else {
+    if (keyIsDown(87)) moveY -= 1; // W
+    if (keyIsDown(83)) moveY += 1; // S
+    if (keyIsDown(65)) moveX -= 1; // A
+    if (keyIsDown(68)) moveX += 1; // D
+  }
 
-  // Impede sair do mapa
+  let mag = sqrt(moveX * moveX + moveY * moveY);
+  if (mag > 0) {
+    moveX /= mag;
+    moveY /= mag;
+    player.x += moveX * player.speed * dt;
+    player.y += moveY * player.speed * dt;
+  }
+
+  // Bordas do mapa
   player.x = constrain(player.x, player.size, width - player.size);
   player.y = constrain(player.y, player.size, height - player.size);
 
+  // Spawn inimigo
   spawnTimer -= dt;
   if (spawnTimer <= 0) {
     spawnEnemy();
-    spawnTimer = 1;
+    spawnTimer = getSpawnInterval();
   }
 
+  // Tiros automáticos
   fireTimer -= dt;
   if (fireTimer <= 0) {
     fireAllBullets();
     fireTimer = player.fireRate;
   }
 
+  // Orbs (com cooldown de hit)
   for (let orb of orbs) {
     let ability = getAbility(3);
     let lvl = ability ? ability.level : 0;
     let radius = 30 + lvl * 10;
     let speed = 2 + lvl * 0.5;
 
+    if (orb.hitCD > 0) orb.hitCD -= dt;
+
     orb.angle += speed * dt;
     orb.x = player.x + cos(orb.angle) * radius;
     orb.y = player.y + sin(orb.angle) * radius;
 
     for (let i = enemies.length - 1; i >= 0; i--) {
-      if (dist(orb.x, orb.y, enemies[i].x, enemies[i].y) < 15) {
-        stars.push({ x: enemies[i].x, y: enemies[i].y });
-        enemies.splice(i, 1);
+      let e = enemies[i];
+      if (dist(orb.x, orb.y, e.x, e.y) < (e.size / 2 + 6)) {
+        if (orb.hitCD <= 0) {
+          e.hp -= ORB_DAMAGE;
+          orb.hitCD = ORB_HIT_COOLDOWN;
+          if (e.hp <= 0) killEnemyAtIndex(i);
+        }
       }
     }
   }
 
+  // Bombas caindo
   let ability4 = getAbility(4);
   let lvl4 = ability4 ? ability4.level : 0;
   let bombInterval = lvl4 > 0 ? max(3, 15 - lvl4 * 2) : 15;
@@ -170,22 +262,24 @@ function updateGame() {
     if (b.y > height) {
       for (let j = enemies.length - 1; j >= 0; j--) {
         if (abs(enemies[j].x - b.x) < 24) {
-          stars.push({ x: enemies[j].x, y: enemies[j].y });
-          enemies.splice(j, 1);
+          enemies[j].hp -= 9999; // bomba mata normal e causa grande dano no boss
+          if (enemies[j].hp <= 0) killEnemyAtIndex(j);
         }
       }
       falling.splice(i, 1);
     }
   }
 
+  // Inimigos perseguindo
+  const speedScale = getSpeedScale();
   for (let i = enemies.length - 1; i >= 0; i--) {
     let e = enemies[i];
     let dx = player.x - e.x;
     let dy = player.y - e.y;
     let distVal = sqrt(dx * dx + dy * dy);
     if (distVal > 0) {
-      e.x += (dx / distVal) * e.speed * dt;
-      e.y += (dy / distVal) * e.speed * dt;
+      e.x += (dx / distVal) * e.speed * speedScale * dt;
+      e.y += (dy / distVal) * e.speed * speedScale * dt;
     }
     if (distVal < player.size) {
       player.hp -= 1;
@@ -194,6 +288,7 @@ function updateGame() {
     }
   }
 
+  // Balas
   for (let i = bullets.length - 1; i >= 0; i--) {
     let b = bullets[i];
     b.x += b.dx * b.speed * dt;
@@ -204,13 +299,19 @@ function updateGame() {
       continue;
     }
 
+    let hitSomething = false;
     for (let j = enemies.length - 1; j >= 0; j--) {
       let e = enemies[j];
-      if (dist(b.x, b.y, e.x, e.y) < 15) {
-        stars.push({ x: e.x, y: e.y });
-        enemies.splice(j, 1);
+      if (dist(b.x, b.y, e.x, e.y) < (e.size / 2 + 4)) {
+        e.hp -= BULLET_DAMAGE;
+        hitSomething = true;
 
-        if (b.explosion) explodeAt(e.x, e.y, b.explosion);
+        if (e.hp <= 0) {
+          killEnemyAtIndex(j);
+          if (b.explosion) explodeAt(e.x, e.y, b.explosion);
+        } else {
+          if (b.explosion) explodeAt(b.x, b.y, b.explosion);
+        }
 
         if (b.remainingPierce > 0) {
           b.remainingPierce--;
@@ -220,8 +321,12 @@ function updateGame() {
         break;
       }
     }
+    if (!hitSomething && b.explosion && (b.x < 0 || b.x > width || b.y < 0 || b.y > height)) {
+      // nada
+    }
   }
 
+  // Coletar estrelas (XP)
   for (let i = stars.length - 1; i >= 0; i--) {
     if (dist(player.x, player.y, stars[i].x, stars[i].y) < player.size) {
       addXP(1);
@@ -229,6 +334,7 @@ function updateGame() {
     }
   }
 
+  // Troca de round
   roundTimer -= dt;
   if (roundTimer <= 0) {
     roundTimer = roundTime;
@@ -237,6 +343,7 @@ function updateGame() {
   }
 }
 
+/* === MAPA DE FUNDO === */
 function drawMapScrolling() {
   let tileSize = 100;
   let offsetX = -player.x % tileSize;
@@ -250,104 +357,130 @@ function drawMapScrolling() {
   push();
   rectMode(CORNER);
   noStroke();
-
   for (let x = offsetX - tileSize; x < width + tileSize; x += tileSize) {
     for (let y = offsetY - tileSize; y < height + tileSize; y += tileSize) {
-      if ((x + y) % 200 === 0) {
-        fill(baseR, baseG, baseB);
-      } else {
-        fill(baseR * 0.6, baseG * 0.6, baseB * 0.6);
-      }
+      if ((x + y) % 200 === 0) fill(baseR, baseG, baseB);
+      else fill(baseR * 0.6, baseG * 0.6, baseB * 0.6);
       rect(x, y, tileSize, tileSize);
     }
   }
   pop();
 }
 
+/* === DESENHO DO JOGO === */
 function drawGame() {
   drawMapScrolling();
 
+  // Player
   imageMode(CENTER);
   image(playerImg, player.x, player.y, 40, 40);
 
-  fill(255);
-  textSize(16);
-  for (let e of enemies) text(e.letter, e.x, e.y);
+  // Inimigos (como imagens)
+  for (let e of enemies) {
+    imageMode(CENTER);
+    image(e.img, e.x, e.y, e.size, e.size);
 
+    // Barra de vida para BOSS
+    if (e.isBoss) {
+      let bw = 60, bh = 6;
+      let ratio = constrain(e.hp / e.maxHp, 0, 1);
+      push();
+      rectMode(CENTER);
+      noStroke();
+      fill(0, 0, 0, 150);
+      rect(e.x, e.y - e.size / 2 - 10, bw, bh);
+      fill(255, 0, 0);
+      rect(e.x - bw / 2 + bw * ratio / 2, e.y - e.size / 2 - 10, bw * ratio, bh);
+      pop();
+    }
+  }
+
+  // Balas
   fill(255, 200, 0);
-  for (let b of bullets) ellipse(b.x, b.y, 6);
+  for (let b of bullets) ellipse(b.x, b.y, isMobile ? 10 : 6);
 
+  // Estrelas (XP)
   fill(255, 255, 0);
+  textAlign(CENTER, CENTER);
   for (let s of stars) text("*", s.x, s.y);
 
-  fill(255, 255, 0);
-  for (let orb of orbs) text("@", orb.x, orb.y);
+  // Orbs
+  textSize(isMobile ? 32 : 24);
+  textAlign(CENTER, CENTER);
+  for (let orb of orbs) text("🌀", orb.x, orb.y);
 
+  // Bombas
   fill(255, 128, 0);
+  textAlign(CENTER, CENTER);
   for (let b of falling) text("!", b.x, b.y);
 
-  // HUD estilo Castlevania
   drawHUD();
   drawAbilitiesHUD();
 }
 
+/* === HUD + BOTÃO PAUSE/PLAY === */
 function drawHUD() {
   push();
-
-  // fundo translúcido
   fill(0, 180);
   rectMode(CORNER);
-  rect(0, 0, width, 50);
+  let hudHeight = isMobile ? 70 : 50;
+  rect(0, 0, width, hudHeight);
 
-  // Barra de HP
-  let hpBarWidth = 200;
-  let hpBarHeight = 16;
-  let hpRatio = player.hp / 5; // assume HP máximo = 5
+  let hpBarWidth = isMobile ? 300 : 200;
+  let hpBarHeight = isMobile ? 24 : 16;
+  let hpRatio = player.hp / 5;
 
   fill(120, 0, 0);
-  rect(20, 20, hpBarWidth, hpBarHeight);
-
+  rect(20, hudHeight / 2 - hpBarHeight / 2, hpBarWidth, hpBarHeight);
   fill(255, 0, 0);
-  rect(20, 20, hpBarWidth * hpRatio, hpBarHeight);
-
+  rect(20, hudHeight / 2 - hpBarHeight / 2, hpBarWidth * hpRatio, hpBarHeight);
   stroke(255);
   noFill();
-  rect(20, 20, hpBarWidth, hpBarHeight);
+  rect(20, hudHeight / 2 - hpBarHeight / 2, hpBarWidth, hpBarHeight);
 
   noStroke();
   fill(255);
-  textSize(14);
-
-  // XP, Level, Round
+  textSize(isMobile ? 22 : 14);
   textAlign(LEFT, CENTER);
-  text("XP: " + player.xp, 240, 28);
-  text("Level: " + player.level, 320, 28);
-  text("Round: " + roundNumber, 420, 28);
+  text("XP: " + player.xp, hpBarWidth + 40, hudHeight / 2);
+  text("Level: " + player.level, hpBarWidth + 140, hudHeight / 2);
+  text("Round: " + roundNumber, hpBarWidth + 260, hudHeight / 2);
 
-  // Tempo no canto direito
   textAlign(RIGHT, CENTER);
-  textSize(16);
-  text("Tempo: " + ceil(roundTimer), width - 20, 28);
+  textSize(isMobile ? 26 : 16);
+  text("Tempo: " + ceil(roundTimer), width - 90, hudHeight / 2);
+
+  // botão pause/play no canto direito
+  pauseButton.w = isMobile ? 60 : 40;
+  pauseButton.h = isMobile ? 60 : 40;
+  pauseButton.x = width - pauseButton.w - 10;
+  pauseButton.y = 5;
+
+  fill(80, 80, 80, 200);
+  rect(pauseButton.x, pauseButton.y, pauseButton.w, pauseButton.h, 10);
+  fill(255);
+  textAlign(CENTER, CENTER);
+  textSize(isMobile ? 28 : 20);
+  if (gameState === "paused") text("▶", pauseButton.x + pauseButton.w / 2, pauseButton.y + pauseButton.h / 2);
+  else text("⏸", pauseButton.x + pauseButton.w / 2, pauseButton.y + pauseButton.h / 2);
 
   pop();
 }
 
 function drawAbilitiesHUD() {
   let startX = 20;
-  let startY = 60; // logo abaixo do HUD
-  let gap = 50;
+  let startY = isMobile ? 100 : 60;
+  let gap = isMobile ? 70 : 50;
 
   textAlign(CENTER, CENTER);
-  textSize(28); // ícones maiores
+  textSize(isMobile ? 42 : 28);
 
   for (let i = 0; i < abilities.length; i++) {
     let ab = abilities[i];
-
-    // define símbolo
     let symbol = "?";
     if (ab.id === 1) symbol = "➖";
     if (ab.id === 2) symbol = "➕";
-    if (ab.id === 3) symbol = "⚪";
+    if (ab.id === 3) symbol = "🌀";
     if (ab.id === 4) symbol = "💣";
     if (ab.id === 5) symbol = "🏃";
     if (ab.id === 6) symbol = "⚡";
@@ -355,21 +488,121 @@ function drawAbilitiesHUD() {
     if (ab.id === 8) symbol = "💥";
     if (ab.id === 9) symbol = "⇔";
 
-    // desenha o ícone
     fill(255);
     text(symbol, startX + i * gap, startY);
 
-    // desenha nível embaixo
-    textSize(12);
+    textSize(isMobile ? 20 : 12);
     fill(255, 255, 0);
-    text("Lv" + ab.level, startX + i * gap, startY + 20);
+    text("Lv" + ab.level, startX + i * gap, startY + (isMobile ? 40 : 20));
 
-    textSize(28); // volta para ícones
+    textSize(isMobile ? 42 : 28);
   }
 }
 
+/* === OVERLAY DE PAUSE === */
+function drawPauseOverlay() {
+  push();
+  
+  textAlign(CENTER, CENTER);
+  textSize(isMobile ? 36 : 26);
+  text("PAUSADO\nToque/clica no ▶ para voltar ou pressione P", width / 2, height / 2);
+  pop();
+}
 
+/* === JOYSTICK VIRTUAL (mobile) === */
+function drawJoystick() {
+  if (!joystick.active) return;
+  stroke(255);
+  noFill();
+  ellipse(joystick.baseX, joystick.baseY, 100, 100);
+  fill(255, 100);
+  noStroke();
+  ellipse(joystick.stickX, joystick.stickY, 60, 60);
+}
 
+/* === INPUT UNIFICADO (mouse/touch) === */
+function handlePointerPressed(px, py) {
+  // Menu / Game Over
+  if (gameState === "menu") { gameState = "playing"; return true; }
+  if (gameState === "gameover") { resetGame(); gameState = "playing"; return true; }
+
+  // Botão pause/play (funciona nos dois estados)
+  if (
+    px > pauseButton.x &&
+    px < pauseButton.x + pauseButton.w &&
+    py > pauseButton.y &&
+    py < pauseButton.y + pauseButton.h
+  ) {
+    gameState = (gameState === "paused") ? "playing" : "paused";
+    return true;
+  }
+
+  // Level Up: clique na caixa escolhe habilidade
+  if (gameState === "levelup") {
+    for (let box of levelUpBoxes) {
+      if (px >= box.x && px <= box.x + box.w && py >= box.y && py <= box.y + box.h) {
+        applyAbility(box.id);
+        return true;
+      }
+    }
+  }
+
+  return false; // não foi consumido
+}
+
+function mousePressed() {
+  handlePointerPressed(mouseX, mouseY);
+}
+
+function touchStarted() {
+  if (touches.length === 0) return false;
+  const px = touches[0].x, py = touches[0].y;
+  const consumed = handlePointerPressed(px, py);
+  if (!consumed && gameState === "playing") {
+    // ativa joystick só se não clicou em UI
+    joystick.active = true;
+    joystick.baseX = px;
+    joystick.baseY = py;
+    joystick.stickX = px;
+    joystick.stickY = py;
+  }
+  return false;
+}
+
+function touchMoved() {
+  if (joystick.active && touches.length > 0) {
+    joystick.stickX = touches[0].x;
+    joystick.stickY = touches[0].y;
+  }
+  return false;
+}
+
+function touchEnded() {
+  joystick.active = false;
+  return false;
+}
+
+/* === TECLADO === */
+function keyPressed() {
+  // Toggle pause pelo P
+  if (key === 'p' || key === 'P') {
+    if (gameState === "playing") gameState = "paused";
+    else if (gameState === "paused") gameState = "playing";
+  }
+
+  if (gameState === "menu" && keyCode === ENTER) {
+    gameState = "playing";
+  } else if (gameState === "gameover" && keyCode === ENTER) {
+    resetGame();
+    gameState = "playing";
+  } else if (gameState === "levelup") {
+    if (key === "1" && choices[0] != null) applyAbility(choices[0]);
+    if (key === "2" && choices[1] != null) applyAbility(choices[1]);
+    if (key === "3" && choices[2] != null) applyAbility(choices[2]);
+  }
+}
+
+/* === LEVEL UP (overlay clicável e por teclado) === */
 function drawLevelUp() {
   fill(0, 180);
   rectMode(CORNER);
@@ -377,13 +610,16 @@ function drawLevelUp() {
 
   fill(255);
   textAlign(CENTER, CENTER);
-  textSize(20);
+  textSize(isMobile ? 32 : 20);
   text("Você subiu de nível! Escolha uma habilidade:", width / 2, 150);
 
-  let boxWidth = 500;
-  let boxHeight = 60;
-  let startY = 220;
-  let gap = 30;
+  // caixas dimensionadas para mobile/desktop
+  let boxWidth = min(width * 0.85, isMobile ? 640 : 520);
+  let boxHeight = isMobile ? 100 : 60;
+  let startY = height * 0.35;
+  let gap = isMobile ? 50 : 30;
+
+  levelUpBoxes = []; // recalcula cada frame
 
   for (let i = 0; i < choices.length; i++) {
     let id = choices[i];
@@ -391,49 +627,89 @@ function drawLevelUp() {
     let lvl = ability ? ability.level : 0;
     let extra = ability ? " (lvl " + lvl + ")" : "";
 
+    let cx = width / 2;
+    let cy = startY + i * (boxHeight + gap);
+
+    // fundo da caixa
     fill(50, 100, 200);
     rectMode(CENTER);
-    rect(width / 2, startY + i * (boxHeight + gap), boxWidth, boxHeight, 12);
+    rect(cx, cy, boxWidth, boxHeight, 12);
 
+    // texto
     fill(255);
-    textSize(18);
+    textSize(isMobile ? 26 : 18);
     textAlign(CENTER, CENTER);
-    text(
-      "(" + (i + 1) + ") " + allAbilities[id] + extra,
-      width / 2,
-      startY + i * (boxHeight + gap)
-    );
+    text("(" + (i + 1) + ") " + allAbilities[id] + extra, cx, cy);
+
+    // salva hitbox
+    levelUpBoxes.push({
+      id,
+      x: cx - boxWidth / 2,
+      y: cy - boxHeight / 2,
+      w: boxWidth,
+      h: boxHeight
+    });
   }
 
   fill(255);
-  textSize(14);
+  textSize(isMobile ? 22 : 14);
   textAlign(CENTER, TOP);
-  text("Pressione 1, 2 ou 3 para escolher", width / 2, startY + choices.length * (boxHeight + gap));
+  text("Toque/clica na caixa ou pressione 1, 2 ou 3", width / 2, startY + choices.length * (boxHeight + gap));
 }
 
+/* ===================== INIMIGOS ===================== */
+
 function spawnEnemy() {
+  // escolhe letra aleatória (sem 'f')
+  const letter = random(enemyLetters);
+  const variant = floor(random(2)); // 0 ou 1
+  const img = enemyImgs[letter][variant];
+
+  // posição segura (não spawna em cima do player)
   let ex, ey;
-  let safeDist = 100;
   do {
     ex = random(width);
     ey = random(height);
-  } while (dist(ex, ey, player.x, player.y) < safeDist);
+  } while (dist(ex, ey, player.x, player.y) < SAFE_SPAWN_DIST);
+
+  // decide se é boss (se estiver marcado depois de 35 kills)
+  const isBoss = spawnBossNext;
+  if (isBoss) spawnBossNext = false;
 
   enemies.push({
     x: ex,
     y: ey,
-    letter: String.fromCharCode(65 + floor(random(26))),
-    speed: 100 + random(-20, 20)
+    img: img,
+    size: isBoss ? BOSS_SIZE : NORMAL_SIZE,
+    isBoss: isBoss,
+    hp: isBoss ? BOSS_HP : 1,
+    maxHp: isBoss ? BOSS_HP : 1,
+    speed: 100 + random(-20, 20) // escalará por getSpeedScale() no update
   });
 }
 
+// quando um inimigo morre
+function killEnemyAtIndex(index) {
+  const e = enemies[index];
+  stars.push({ x: e.x, y: e.y });
+  enemies.splice(index, 1);
+
+  killsTotal++;
+  killsSinceBoss++;
+  if (killsSinceBoss >= 35) {
+    spawnBossNext = true; // próximo spawn vira boss
+    killsSinceBoss = 0;
+  }
+}
+
+/* === TIROS: mira no inimigo mais próximo === */
 function fireAllBullets() {
   fireBullet("•", { pierce: getPierceCount(), speedMul: 1 });
 
   for (let a of abilities) {
     let id = a.id, lvl = a.level;
-    if (id === 1) fireBullet("-", { pierce: getPierceCount(), speedMul: 1 + 0.25 * lvl });
-    if (id === 2) fireBullet("+", { pierce: getPierceCount(), speedMul: 1 + 0.35 * lvl });
+    if (id === 1) fireBullet("➖", { pierce: getPierceCount(), speedMul: 1 + 0.25 * lvl });
+    if (id === 2) fireBullet("➕", { pierce: getPierceCount(), speedMul: 1 + 0.35 * lvl });
     if (id === 8) fireBullet("•", { pierce: getPierceCount(), explosion: 20 + 10 * lvl });
     if (id === 9) {
       let pairs = min(3, lvl);
@@ -446,9 +722,32 @@ function fireAllBullets() {
   }
 }
 
+function getClosestEnemy() {
+  if (enemies.length === 0) return null;
+  let closest = enemies[0];
+  let minDist = dist(player.x, player.y, closest.x, closest.y);
+  for (let i = 1; i < enemies.length; i++) {
+    let d = dist(player.x, player.y, enemies[i].x, enemies[i].y);
+    if (d < minDist) {
+      minDist = d;
+      closest = enemies[i];
+    }
+  }
+  return closest;
+}
+
 function fireBullet(char, params = {}) {
-  let dx = mouseX - player.x;
-  let dy = mouseY - player.y;
+  let target = getClosestEnemy();
+  let dx, dy;
+
+  if (target) {
+    dx = target.x - player.x;
+    dy = target.y - player.y;
+  } else {
+    dx = 1; // fallback: direita
+    dy = 0;
+  }
+
   let distVal = sqrt(dx * dx + dy * dy);
   if (distVal === 0) distVal = 0.0001;
   dx /= distVal;
@@ -471,15 +770,18 @@ function fireBullet(char, params = {}) {
   });
 }
 
+/* === EXPLOSÃO: dano em área === */
 function explodeAt(x, y, radius) {
   for (let i = enemies.length - 1; i >= 0; i--) {
-    if (dist(x, y, enemies[i].x, enemies[i].y) <= radius) {
-      stars.push({ x: enemies[i].x, y: enemies[i].y });
-      enemies.splice(i, 1);
+    let e = enemies[i];
+    if (dist(x, y, e.x, e.y) <= radius) {
+      e.hp -= EXPLOSION_DAMAGE;
+      if (e.hp <= 0) killEnemyAtIndex(i);
     }
   }
 }
 
+/* === XP / LEVEL UP === */
 function addXP(amount) {
   player.xp += amount;
   let need = player.level * 5;
@@ -508,14 +810,14 @@ function applyAbility(id) {
     ability.level++;
   } else if (abilities.length < 6) {
     abilities.push({ id: id, level: 1 });
-    if (id === 3) orbs.push({ angle: 0 });
+    if (id === 3) orbs.push({ angle: 0, hitCD: 0 }); // NEW: orb com cooldown
   }
 
   if (id === 5) player.speed += 30;
   if (id === 6) player.fireRate = max(0.05, player.fireRate - 0.05);
   if (id === 3) {
     let lvl = getAbility(3).level;
-    while (orbs.length < min(3, lvl)) orbs.push({ angle: 0 });
+    while (orbs.length < min(3, lvl)) orbs.push({ angle: 0, hitCD: 0 });
   }
 
   gameState = "playing";
@@ -529,21 +831,3 @@ function getPierceCount() {
   let ab = getAbility(7);
   return ab ? ab.level : 0;
 }
-
-function keyPressed() {
-  if (gameState === "menu" && keyCode === ENTER) {
-    gameState = "playing";
-  } else if (gameState === "gameover" && keyCode === ENTER) {
-    resetGame();
-    gameState = "playing";
-  } else if (gameState === "levelup") {
-    if (key === "1" && choices[0]) applyAbility(choices[0]);
-    if (key === "2" && choices[1]) applyAbility(choices[1]);
-    if (key === "3" && choices[2]) applyAbility(choices[2]);
-  } else if (gameState === "playing" && (key === "p" || key === "P")) {
-    gameState = "paused";
-  } else if (gameState === "paused" && (key === "p" || key === "P")) {
-    gameState = "playing";
-  }
-}
-
